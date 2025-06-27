@@ -13,7 +13,7 @@ except ImportError:
     talib = None
 
 st.set_page_config(layout="wide")
-st.title("S&P 500 Technical Analysis Screener with Patterns")
+st.title("S&P 500 Screener App by FHS")
 
 # --- INPUT ---
 symbol = st.text_input("Enter a stock symbol:", "AAPL").upper()
@@ -203,6 +203,7 @@ with col2:
     except Exception:
         st.warning("Company profile not available.")
 
+
 # --- CHART ---
 fig = go.Figure(data=[go.Candlestick(
     x=df.index,
@@ -233,3 +234,153 @@ st.line_chart(df['Stochastic'])
 
 if st.checkbox("Show Raw Data"):
     st.write(df.tail(20))
+
+# ===================== FUNDAMENTAL VALUATION BLOCK =====================
+
+st.subheader("📉 Fundamental Valuation")
+
+try:
+    ticker = yf.Ticker(symbol)
+    info = ticker.info
+
+    # Current price
+    current_price = close.iloc[-1]
+
+    # Get fundamentals with fallback
+    pe = info.get("trailingPE")
+    ps = info.get("priceToSalesTrailing12Months")
+    pb = info.get("priceToBook")
+    ev_to_ebitda = info.get("enterpriseToEbitda")
+    eps = info.get("trailingEps")
+    revenue = info.get("totalRevenue")
+    net_income = info.get("netIncomeToCommon")
+    book_value = info.get("bookValue")
+    ebitda = info.get("ebitda")
+
+    # Sector benchmarking
+    sector = info.get("sector", None)
+    if sector:
+        sp500 = yf.Ticker("^GSPC")
+        sector_pe = pe  # default to same if sector data not found
+        sector_ps = ps
+        sector_pb = pb
+        sector_ev_ebitda = ev_to_ebitda
+
+        # Optional: build dictionary with known sector multiples (can be expanded)
+        sector_benchmarks = {
+            "Technology": {"PE": 25, "PS": 6, "PB": 10, "EV/EBITDA": 20},
+            "Healthcare": {"PE": 20, "PS": 5, "PB": 4, "EV/EBITDA": 15},
+            "Financial Services": {"PE": 12, "PS": 3, "PB": 1.5, "EV/EBITDA": 10},
+            "Consumer Cyclical": {"PE": 18, "PS": 2, "PB": 3, "EV/EBITDA": 12},
+            "Energy": {"PE": 10, "PS": 1.5, "PB": 1.2, "EV/EBITDA": 6}
+        }
+        benchmarks = sector_benchmarks.get(sector, {})
+        sector_pe = benchmarks.get("PE", pe or 15)
+        sector_ps = benchmarks.get("PS", ps or 3)
+        sector_pb = benchmarks.get("PB", pb or 2)
+        sector_ev_ebitda = benchmarks.get("EV/EBITDA", ev_to_ebitda or 10)
+    else:
+        sector_pe = pe or 15
+        sector_ps = ps or 3
+        sector_pb = pb or 2
+        sector_ev_ebitda = ev_to_ebitda or 10
+
+    # === TARGET PRICE ESTIMATES ===
+    targets = {}
+
+    if eps and sector_pe:
+        targets['P/E'] = eps * sector_pe
+    if revenue and sector_ps:
+        shares_outstanding = info.get("sharesOutstanding")
+        if shares_outstanding:
+            revenue_per_share = revenue / shares_outstanding
+            targets['P/S'] = revenue_per_share * sector_ps
+    if book_value and sector_pb:
+        targets['P/B'] = book_value * sector_pb
+    if ebitda and sector_ev_ebitda:
+        enterprise_value = ebitda * sector_ev_ebitda
+        debt = info.get("totalDebt", 0)
+        cash = info.get("totalCash", 0)
+        equity_value = enterprise_value - debt + cash
+        shares_outstanding = info.get("sharesOutstanding", None)
+        if shares_outstanding and equity_value:
+            targets['EV/EBITDA'] = equity_value / shares_outstanding
+
+    # --- Display Table of Metrics and Target Prices ---
+    method_rows = []
+    for method, target in targets.items():
+        diff_pct = ((target - current_price) / current_price) * 100
+        method_rows.append({
+            "Method": method,
+            "Target Price": f"${target:.2f}",
+            "Current Price": f"${current_price:.2f}",
+            "Difference %": f"{diff_pct:+.2f}%",
+            "Direction": "BUY" if diff_pct > 5 else "SELL" if diff_pct < -5 else "NEUTRAL"
+        })
+
+    method_df = pd.DataFrame(method_rows)
+    st.dataframe(method_df.set_index("Method"), use_container_width=True)
+
+    # --- AGGREGATE TARGET ---
+    if targets:
+        avg_target = sum(targets.values()) / len(targets)
+        total_diff_pct = ((avg_target - current_price) / current_price) * 100
+        overall_fundamental = "BUY" if total_diff_pct > 5 else "SELL" if total_diff_pct < -5 else "NEUTRAL"
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🔎 Fundamental Target", f"${avg_target:.2f}")
+        col2.metric("💰 Current Price", f"${current_price:.2f}")
+        col3.metric("📊 Fundamental Direction", f"{overall_fundamental}", delta=f"{total_diff_pct:.2f}%", delta_color="inverse" if overall_fundamental == "SELL" else "normal")
+
+  # --- FUNDAMENTAL VALUATION RAW DATA BLOCK ---
+except Exception as e:
+    st.warning(f"⚠️ Error: {e}")
+    
+try:
+    st.subheader("📄 Raw Fundamentals")
+
+    ticker_obj = yf.Ticker(symbol)
+    info = ticker_obj.info
+    # Determine latest report date safely from timestamp
+    fiscal_date = info.get("lastFiscalYearEnd")
+
+    if isinstance(fiscal_date, (int, float)) and fiscal_date > 0:
+        report_date = pd.to_datetime(fiscal_date, unit='s').strftime("%Y-%m-%d")
+    else:
+        report_date = "Unavailable"
+
+    st.markdown(f"**🗓 Data as of:** {report_date}")
+
+    # Collect fundamentals
+    fundamentals_raw = {
+        "Revenue (TTM)": info.get("totalRevenue"),
+        "Net Income (TTM)": info.get("netIncomeToCommon"),
+        "Free Cash Flow": info.get("freeCashflow"),
+        "Book Value": info.get("bookValue"),
+        "EPS (TTM)": info.get("trailingEps"),
+        "P/E Ratio": info.get("trailingPE"),
+        "Forward P/E": info.get("forwardPE"),
+        "Price/Sales Ratio": info.get("priceToSalesTrailing12Months"),
+        "Price/Book Ratio": info.get("priceToBook"),
+        "PEG Ratio": info.get("pegRatio"),
+        "EV/EBITDA": info.get("enterpriseToEbitda"),
+        "Beta": info.get("beta"),
+        "Shares Outstanding": info.get("sharesOutstanding"),
+        "Market Cap": info.get("marketCap"),
+    }
+
+    # Display with formatting
+    for key, val in fundamentals_raw.items():
+        if val is None:
+            st.markdown(f"- **{key}:** N/A")
+        elif isinstance(val, (int, float)):
+            if abs(val) >= 1_000_000:
+                val_fmt = f"${val/1_000_000_000:.2f}B" if abs(val) >= 1_000_000_000 else f"${val/1_000_000:.2f}M"
+            else:
+                val_fmt = f"${val:,.2f}"
+            st.markdown(f"- **{key}:** {val_fmt}")
+        else:
+            st.markdown(f"- **{key}:** {val}")
+except Exception as e:
+    st.error(f"⚠️ Error in fundamental valuation: {e}")
+ 
